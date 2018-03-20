@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+
+require "thor"
+require "pgslice/commands"
+
+class PgSliceCommand < Thor
+  def self.exit_on_failure?
+    true
+  end
+
+  desc "prep TABLE COLUMN PERIOD", "prepare the TABLE with specified column and period"
+  def prep(table, column, period)
+    PgSlice::Prep.new(table, column, period).run
+  end
+
+  desc "add_partitions TABLE", "add_partitions to TABLE, e.g. pgslice add_partitions visits --intermediate --past 1 --future 1"
+  option :intermediate, type: :boolean
+  option :past, type: :numeric, required: true
+  option :future, type: :numeric, required: true
+  def add_partitions(table)
+    PgSlice::AddPartitions.new(table, options).run
+  end
+
+  desc "fill TABLE", "fill TABLE with original data"
+  def fill(table)
+    PgSlice::Fill.new(table).run
+  end
+end
+
+PgSliceCommand.start
