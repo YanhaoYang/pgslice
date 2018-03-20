@@ -1,4 +1,7 @@
+require "pgslice/analyze"
 require "pgslice/prep"
+require "pgslice/unprep"
 require "pgslice/add_partitions"
 require "pgslice/fill"
-require "pgslice/unprep"
+require "pgslice/swap"
+require "pgslice/unswap"
