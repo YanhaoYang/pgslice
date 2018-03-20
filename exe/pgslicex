@@ -22,8 +22,18 @@ class PgSliceCommand < Thor
   end
 
   desc "fill TABLE", "fill TABLE with original data"
+  option :batch_by, type: :string, desc: "the column name of which will be used to batch data"
+  option :source_table, type: :string
+  option :dest_table, type: :string
+  option :swapped, type: :boolean, desc: "source table and destination table have been swapped."
+  option :batch_size, type: :numeric, required: true, desc: "default: 1000"
   def fill(table)
-    PgSlice::Fill.new(table).run
+    PgSlice::Fill.new(table, options).run
+  end
+
+  desc "unprep TABLE", "unprepare the TABLE"
+  def unprep(table)
+    PgSlice::Unprep.new(table).run
   end
 end
 

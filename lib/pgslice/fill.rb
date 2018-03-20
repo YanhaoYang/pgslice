@@ -2,30 +2,91 @@ require_relative "connection"
 
 module PgSlice
   class Fill
-    attr_reader :table, :options, :conn
+    attr_reader :table, :options, :conn, :batch_size
 
     def initialize(table, options = {})
       @table = table
       @options = options
+      @batch_size = options[:batch_size] || 1000
       @conn = Connection.new(options[:url])
     end
 
     def run
-      source_table = options[:source_table]
-      dest_table = options[:dest_table]
-
-      if options[:swapped]
-        source_table ||= retired_name(table)
-        dest_table ||= table
-      else
-        source_table ||= table
-        dest_table ||= intermediate_name(table)
-      end
+      Signal.trap("INT") { |signo| @aborted = true; puts "\n\n!!! Got signal INT. Aborting ..." }
 
       abort "Table not found: #{source_table}" unless conn.table_exists?(source_table)
       abort "Table not found: #{dest_table}" unless conn.table_exists?(dest_table)
 
-      period, field, cast, needs_comment, declarative = settings_from_trigger(table, dest_table)
+      if options[:batch_by]
+        batch_by_generic_column
+      else
+        batch_by_numeric_primary_key
+      end
+    end
+
+    private
+
+    def source_table
+      @source_table ||= options[:source_table] || (options[:swapped] ? retired_name(table) : table)
+    end
+
+    def dest_table
+      @dest_table ||= options[:dest_table] || (options[:swapped] ? table : intermediate_name(table))
+    end
+
+    def batch_by_generic_column
+      column = options[:batch_by]
+      starting_val = get_starting_val(column)
+      unless starting_val
+        abort "All data have been copied?"
+      end
+
+      fields = conn.columns(source_table).map { |c| conn.quote_ident(c) }.join(", ")
+
+      batch_count = 1
+      loop do
+        where = "#{conn.quote_ident(column)} >= '#{starting_val}'"
+
+        ending_val = get_ending_val(column, starting_val)
+        if ending_val
+          where << " AND #{conn.quote_ident(column)} < '#{ending_val}'"
+        end
+
+        if options[:where]
+          where << " AND #{options[:where]}"
+        end
+
+        query = <<-SQL
+          /* batch ##{batch_count} at #{Time.now} */
+          INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
+            SELECT #{fields} FROM #{conn.quote_ident(source_table)}
+            WHERE #{where}
+        SQL
+
+        conn.run_query(query)
+
+        if ending_val
+          starting_val = ending_val
+        else
+          puts "All done!"
+          exit(0)
+        end
+
+        if options[:sleep] && starting_id <= max_source_id
+          sleep(options[:sleep])
+        end
+
+        batch_count += 1
+
+        if @aborted
+          puts "Task is cancelled."
+          exit(0)
+        end
+      end
+    end
+
+    def batch_by_numeric_primary_key
+      period, field, cast, _, declarative = settings_from_trigger(table, dest_table)
 
       if period
         name_format = self.name_format(period)
@@ -57,7 +118,7 @@ module PgSlice
       end
 
       starting_id = max_dest_id
-      fields = columns(source_table).map { |c| quote_ident(c) }.join(", ")
+      fields = columns(source_table).map { |c| conn.quote_ident(c) }.join(", ")
       batch_size = options[:batch_size]
 
       i = 1
@@ -68,9 +129,9 @@ module PgSlice
       end
 
       while starting_id < max_source_id
-        where = "#{quote_ident(primary_key)} > #{starting_id} AND #{quote_ident(primary_key)} <= #{starting_id + batch_size}"
+        where = "#{conn.quote_ident(primary_key)} > #{starting_id} AND #{conn.quote_ident(primary_key)} <= #{starting_id + batch_size}"
         if starting_time
-          where << " AND #{quote_ident(field)} >= #{sql_date(starting_time, cast)} AND #{quote_ident(field)} < #{sql_date(ending_time, cast)}"
+          where << " AND #{conn.quote_ident(field)} >= #{sql_date(starting_time, cast)} AND #{conn.quote_ident(field)} < #{sql_date(ending_time, cast)}"
         end
         if options[:where]
           where << " AND #{options[:where]}"
@@ -78,8 +139,8 @@ module PgSlice
 
         query = <<-SQL
 /* #{i} of #{batch_count} */
-INSERT INTO #{quote_ident(dest_table)} (#{fields})
-    SELECT #{fields} FROM #{quote_ident(source_table)}
+INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
+    SELECT #{fields} FROM #{conn.quote_ident(source_table)}
     WHERE #{where}
         SQL
 
@@ -94,10 +155,61 @@ INSERT INTO #{quote_ident(dest_table)} (#{fields})
       end
     end
 
-    private
-
     def intermediate_name(table)
       "#{table}_intermediate"
+    end
+
+    def max_id(table, primary_key, below: nil, where: nil)
+      query = "SELECT MAX(#{conn.quote_ident(primary_key)}) FROM #{conn.quote_ident(table)}"
+      conditions = []
+      conditions << "#{conn.quote_ident(primary_key)} <= #{below}" if below
+      conditions << where if where
+      query << " WHERE #{conditions.join(" AND ")}" if conditions.any?
+      execute(query)[0]["max"].to_i
+    end
+
+    def min_id(table, primary_key, column, cast, starting_time, where)
+      query = "SELECT MIN(#{conn.quote_ident(primary_key)}) FROM #{conn.quote_ident(table)}"
+      conditions = []
+      conditions << "#{conn.quote_ident(column)} >= #{sql_date(starting_time, cast)}" if starting_time
+      conditions << where if where
+      query << " WHERE #{conditions.join(" AND ")}" if conditions.any?
+      (execute(query)[0]["min"] || 1).to_i
+    end
+
+    def get_ending_val(column, starting_val, offset = batch_size)
+      query = <<-SQL
+        SELECT #{conn.quote_ident(column)} val FROM #{conn.quote_ident(source_table)}
+          WHERE #{conn.quote_ident(column)} >= '#{starting_val}'
+          ORDER BY #{conn.quote_ident(column)} OFFSET #{batch_size} LIMIT 1
+      SQL
+      rows = conn.execute(query)
+      return if rows.empty?
+
+      rows[0]["val"]
+    end
+
+    def get_starting_val(column)
+      query = "SELECT MAX(#{conn.quote_ident(column)}) AS val FROM #{conn.quote_ident(dest_table)}"
+      rows = conn.execute(query)
+      return default_starting_val(table, column) if rows.empty? || rows[0]["val"].nil?
+
+      get_ending_val(column, rows[0]["val"], 1)
+    end
+
+    def default_starting_val(table, column)
+      column_type = conn.column_type(table, column)
+
+      case column_type
+      when "timestamp without time zone", "timestamp with time zone"
+        "1900-01-01 00:00:00"
+      when "date"
+        "1900-01-01"
+      when "text"
+        ""
+      else
+        abort "Unknow column type #{column_type} of #{column}"
+      end
     end
   end
 end

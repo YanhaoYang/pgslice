@@ -79,6 +79,10 @@ COMMENT ON TRIGGER #{conn.quote_ident(trigger_name)} ON #{conn.quote_ident(inter
 
     private
 
+    def intermediate_table
+      "#{table}_intermediate"
+    end
+
     def trigger_name
       "#{table}_insert_trigger"
     end

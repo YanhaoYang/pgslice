@@ -49,6 +49,24 @@ module PgSlice
       row && row["attname"]
     end
 
+    def column_type(table, column)
+      query = <<-SQL
+        SELECT
+          pg_attribute.attname,
+          format_type(pg_attribute.atttypid, pg_attribute.atttypmod) AS atttype
+        FROM
+          pg_class, pg_attribute, pg_namespace
+        WHERE
+          relname = $2 AND
+          nspname = $1 AND
+          pg_attribute.attname = $3 AND
+          pg_class.relnamespace = pg_namespace.oid AND
+          pg_attribute.attrelid = pg_class.oid
+      SQL
+      row = execute(query, [schema, table, column])[0]
+      row && row["atttype"]
+    end
+
     def regclass(schema, table)
       "'#{quote_ident(schema)}.#{quote_ident(table)}'::regclass"
     end
