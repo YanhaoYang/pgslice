@@ -19,7 +19,7 @@ class PgSliceCommand < Thor
   option :intermediate, type: :boolean
   option :past, type: :numeric, required: true
   option :future, type: :numeric, required: true
-  def add_partitions(table, options)
+  def add_partitions(table)
     PgSlice::AddPartitions.new(table, options).run
   end
 

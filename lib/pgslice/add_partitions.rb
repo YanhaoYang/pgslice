@@ -6,7 +6,7 @@ module PgSlice
 
     def initialize(table, options = {})
       @original_table = table
-      @table = options[:intermediate] ? "#{original_table}_intermediate" : original_table
+      @table = options[:intermediate] ? intermediate_table : original_table
       @options = options
       @conn = Connection.new(options[:url])
     end
@@ -82,40 +82,29 @@ module PgSlice
 
       unless declarative
         # update trigger based on existing partitions
-        current_defs = []
-        future_defs = []
-        past_defs = []
         name_format = name_format(period)
         existing_tables = existing_partitions(original_table)
         existing_tables = (existing_tables + added_partitions).uniq.sort
 
-        existing_tables.each do |table|
-          day = DateTime.strptime(table.split("_").last, name_format)
-          partition_name = "#{original_table}_#{day.strftime(name_format(period))}"
+        first_day = DateTime.strptime(existing_tables.first.split("_").last, name_format)
+        last_day = DateTime.strptime(existing_tables.last.split("_").last, name_format)
+        future_day = advance_date(last_day, period, 1)
 
-          sql = "(NEW.#{conn.quote_ident(field)} >= #{conn.sql_date(day, cast)} AND NEW.#{conn.quote_ident(field)} < #{conn.sql_date(advance_date(day, period, 1), cast)}) THEN
-              INSERT INTO #{conn.quote_ident(partition_name)} VALUES (NEW.*);"
-
-          if day.to_date < today
-            past_defs << sql
-          elsif advance_date(day, period, 1) < today
-            current_defs << sql
-          else
-            future_defs << sql
-          end
-        end
-
-        # order by current period, future periods asc, past periods desc
-        trigger_defs = current_defs + future_defs + past_defs.reverse
-
-        if trigger_defs.any?
+        if existing_tables.any?
           queries << <<-SQL
             CREATE OR REPLACE FUNCTION #{conn.quote_ident(trigger_name)}()
                 RETURNS trigger AS $$
+                DECLARE
+                    postfix text;
                 BEGIN
-                    IF #{trigger_defs.join("\n        ELSIF ")}
+                    IF NEW.#{conn.quote_ident(field)} < #{conn.sql_date(first_day, cast)} THEN
+                        INSERT INTO #{conn.quote_ident(existing_tables.first)} VALUES (NEW.*);
+                    ELSIF NEW.#{conn.quote_ident(field)} >= #{conn.sql_date(future_day, cast)} THEN
+                        INSERT INTO #{conn.quote_ident(existing_tables.last)} VALUES (NEW.*);
                     ELSE
-                        RAISE EXCEPTION 'Date out of range. Ensure partitions are created.';
+                        SELECT to_char(NEW.#{conn.quote_ident(field)}::timestamp, '#{original_table}_#{date_format(period)}') INTO postfix;
+                        EXECUTE format('INSERT INTO %s VALUES ($1.*)', postfix) USING NEW;
+                        RETURN NULL;
                     END IF;
                     RETURN NULL;
                 END;
@@ -124,13 +113,21 @@ module PgSlice
         end
       end
 
+      queries.concat(source_table_insert_trigger)
+      queries.concat(source_table_update_trigger)
+      queries.concat(source_table_delete_trigger)
+
       conn.run_queries(queries) if queries.any?
     end
 
     private
 
+    def intermediate_table
+      "#{original_table}_intermediate"
+    end
+
     def trigger_name
-      "#{original_table}_insert_trigger"
+      "#{table}_insert_trigger"
     end
 
     def settings_from_trigger(original_table, table)
@@ -182,6 +179,15 @@ module PgSlice
       end
     end
 
+    def date_format(period)
+      case period.to_sym
+      when :day
+        "YYYYMMDD"
+      else
+        "YYYYMM"
+      end
+    end
+
     def name_format(period)
       case period.to_sym
       when :day
@@ -193,6 +199,70 @@ module PgSlice
 
     def existing_partitions(table)
       conn.existing_tables(like: "#{table}_%").select { |t| /\A#{Regexp.escape("#{table}_")}\d{6,8}\z/.match(t) }
+    end
+
+    def source_table_insert_trigger
+      name = "#{original_table}_insert_trigger_for_pgslice"
+      queries = []
+      queries << <<-SQL
+          CREATE OR REPLACE FUNCTION #{conn.quote_ident(name)}()
+              RETURNS trigger AS $$
+              BEGIN
+                  INSERT INTO #{conn.quote_ident(intermediate_table)} VALUES (NEW.*);
+                  RETURN NEW;
+              END;
+              $$ LANGUAGE plpgsql;
+      SQL
+      queries
+    end
+
+    def source_table_update_trigger
+      name = "#{original_table}_update_trigger_for_pgslice"
+      queries = []
+      queries << <<-SQL
+          CREATE OR REPLACE FUNCTION #{conn.quote_ident(name)}()
+              RETURNS trigger AS $$
+              DECLARE
+                  tbl  text := quote_ident('#{intermediate_table}');
+                  cols text;
+                  vals text;
+              BEGIN
+                  SELECT INTO cols, vals
+                         string_agg(quote_ident(attname), ', ')
+                        ,string_agg('x.' || quote_ident(attname), ', ')
+                  FROM   pg_attribute
+                  WHERE  attrelid = tbl::regclass
+                  AND    NOT attisdropped   -- no dropped (dead) columns
+                  AND    attnum > 0;        -- no system columns
+
+                  EXECUTE format('
+                  UPDATE %s t
+                  SET   (%s) = (%s)
+                  FROM  (SELECT ($1).*) x
+                  WHERE  t.id = ($2).id'
+                  , tbl, cols, vals) -- assuming unique "id" in every table
+                  USING NEW, OLD;
+                  RETURN NEW;
+              END;
+              $$ LANGUAGE plpgsql;
+      SQL
+      queries
+    end
+
+    def source_table_delete_trigger
+      name = "#{original_table}_delete_trigger_for_pgslice"
+      queries = []
+      queries << <<-SQL
+          CREATE OR REPLACE FUNCTION #{conn.quote_ident(name)}()
+              RETURNS trigger AS $$
+              BEGIN
+                  DELETE FROM #{conn.quote_ident(intermediate_table)}
+                      WHERE id = OLD.id;
+                  RETURN OLD;
+              END;
+              $$ LANGUAGE plpgsql;
+      SQL
+      queries
     end
   end
 end
