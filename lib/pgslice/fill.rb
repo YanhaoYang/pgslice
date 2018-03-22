@@ -17,6 +17,9 @@ module PgSlice
       abort "Table not found: #{source_table}" unless conn.table_exists?(source_table)
       abort "Table not found: #{dest_table}" unless conn.table_exists?(dest_table)
 
+      settings = settings_from_trigger
+      @trigger_created_at = Time.at(settings["created_at"].to_i).utc
+
       if options[:batch_by]
         batch_by_generic_column
       else
@@ -31,14 +34,24 @@ module PgSlice
     end
 
     def dest_table
-      @dest_table ||= options[:dest_table] || (options[:swapped] ? table : intermediate_name(table))
+      @dest_table ||= options[:dest_table] || (options[:swapped] ? table : intermediate_table)
     end
 
     def batch_by_generic_column
       column = options[:batch_by]
+
       starting_val = get_starting_val(column)
       unless starting_val
         abort "All data have been copied?"
+      end
+
+      ending_val = get_ending_val(column)
+      if ending_val
+        query = "SELECT COUNT(*) AS cnt FROM #{conn.quote_ident(source_table)} WHERE created_at = '#{ending_val}'"
+        rows = conn.execute(query)
+        if rows[0]["cnt"].to_i > 1
+          abort "More than one rows with #{column} = #{ending_val}"
+        end
       end
 
       fields = conn.columns(source_table).map { |c| conn.quote_ident(c) }.join(", ")
@@ -47,9 +60,12 @@ module PgSlice
       loop do
         where = "#{conn.quote_ident(column)} >= '#{starting_val}'"
 
-        ending_val = get_ending_val(column, starting_val)
-        if ending_val
-          where << " AND #{conn.quote_ident(column)} < '#{ending_val}'"
+        batch_ending_val = get_batch_ending_val(column, starting_val)
+        if ending_val && batch_ending_val > ending_val
+          batch_ending_val = ending_val
+        end
+        if batch_ending_val
+          where << " AND #{conn.quote_ident(column)} < '#{batch_ending_val}'"
         end
 
         if options[:where]
@@ -65,8 +81,8 @@ module PgSlice
 
         conn.run_query(query)
 
-        if ending_val
-          starting_val = ending_val
+        if batch_ending_val
+          starting_val = batch_ending_val
         else
           puts "All done!"
           exit(0)
@@ -155,7 +171,7 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
       end
     end
 
-    def intermediate_name(table)
+    def intermediate_table
       "#{table}_intermediate"
     end
 
@@ -177,7 +193,7 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
       (execute(query)[0]["min"] || 1).to_i
     end
 
-    def get_ending_val(column, starting_val, offset = batch_size)
+    def get_batch_ending_val(column, starting_val, offset = batch_size)
       query = <<-SQL
         SELECT #{conn.quote_ident(column)} val FROM #{conn.quote_ident(source_table)}
           WHERE #{conn.quote_ident(column)} >= '#{starting_val}'
@@ -190,11 +206,21 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
     end
 
     def get_starting_val(column)
-      query = "SELECT MAX(#{conn.quote_ident(column)}) AS val FROM #{conn.quote_ident(dest_table)}"
+      timestamp = @trigger_created_at.strftime("%Y-%m-%d %H:%M:%S")
+      query = "SELECT MAX(#{conn.quote_ident(column)}) AS val FROM #{conn.quote_ident(dest_table)} WHERE created_at < '#{timestamp}'"
       rows = conn.execute(query)
       return default_starting_val(table, column) if rows.empty? || rows[0]["val"].nil?
 
-      get_ending_val(column, rows[0]["val"], 1)
+      get_batch_ending_val(column, rows[0]["val"], 1)
+    end
+
+    def get_ending_val(column)
+      timestamp = @trigger_created_at.strftime("%Y-%m-%d %H:%M:%S")
+      query = "SELECT MIN(#{conn.quote_ident(column)}) AS val FROM #{conn.quote_ident(dest_table)} WHERE created_at > '#{timestamp}'"
+      rows = conn.execute(query)
+      return if rows.empty?
+
+      rows[0]["val"]
     end
 
     def default_starting_val(table, column)
@@ -209,6 +235,17 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
         ""
       else
         abort "Unknow column type #{column_type} of #{column}"
+      end
+    end
+
+    def trigger_name
+      "#{intermediate_table}_insert_trigger"
+    end
+
+    def settings_from_trigger
+      comment = conn.fetch_trigger(trigger_name, intermediate_table)
+      if comment
+        comment["comment"].split(",").inject({}) { |memo, v| pair = v.split(":"); memo[pair.first] = pair.last; memo}
       end
     end
   end

@@ -2,30 +2,19 @@ require_relative "connection"
 
 module PgSlice
   class Prep
-    attr_reader :table, :column, :period, :options, :conn
+    attr_reader :table, :column, :options, :conn
 
-    SQL_FORMAT = {
-      day: "YYYYMMDD",
-      month: "YYYYMM"
-    }
-
-    def initialize(table, column, period, options = {})
+    def initialize(table, column, options = {})
       @table = table
       @column = column
-      @period = period
       @options = options
       @conn = Connection.new(options[:url])
     end
 
     def run
-
       abort "Table not found: #{table}" unless conn.table_exists?(table)
       abort "Table already exists: #{intermediate_table}" if conn.table_exists?(intermediate_table)
-
-      unless options[:no_partition]
-        abort "Column not found: #{column}" unless conn.columns(table).include?(column)
-        abort "Invalid period: #{period}" unless SQL_FORMAT[period.to_sym]
-      end
+      abort "Column not found: #{column}" unless conn.columns(table).include?(column)
 
       queries = []
 
@@ -39,7 +28,7 @@ module PgSlice
         # add comment
         cast = column_cast(table, column)
         queries << <<-SQL
-          COMMENT ON TABLE #{conn.quote_ident(intermediate_table)} is 'column:#{column},period:#{period},cast:#{cast}';
+          COMMENT ON TABLE #{conn.quote_ident(intermediate_table)} is 'column:#{column},cast:#{cast}';
         SQL
       else
         queries << <<-SQL
@@ -68,8 +57,9 @@ module PgSlice
         SQL
 
         cast = conn.column_cast(table, column)
+        comment = "column:#{column},cast:#{cast},created_at:#{Time.now.to_i}"
         queries << <<-SQL
-          COMMENT ON TRIGGER #{conn.quote_ident(trigger_name)} ON #{conn.quote_ident(intermediate_table)} is 'column:#{column},period:#{period},cast:#{cast}';
+          COMMENT ON TRIGGER #{conn.quote_ident(trigger_name)} ON #{conn.quote_ident(intermediate_table)} is '#{comment}';
         SQL
       end
 
