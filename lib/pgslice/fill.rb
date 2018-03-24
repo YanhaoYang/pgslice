@@ -193,7 +193,7 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
       (execute(query)[0]["min"] || 1).to_i
     end
 
-    def get_batch_ending_val(column, starting_val, offset = batch_size)
+    def get_batch_ending_val(column, starting_val)
       query = <<-SQL
         SELECT #{conn.quote_ident(column)} val FROM #{conn.quote_ident(source_table)}
           WHERE #{conn.quote_ident(column)} >= '#{starting_val}'
@@ -205,13 +205,26 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
       rows[0]["val"]
     end
 
+    def get_next_val(column, starting_val)
+      query = <<-SQL
+        SELECT #{conn.quote_ident(column)} val FROM #{conn.quote_ident(source_table)}
+          WHERE #{conn.quote_ident(column)} > '#{starting_val}'
+          ORDER BY #{conn.quote_ident(column)} OFFSET 1 LIMIT 1
+      SQL
+      rows = conn.execute(query)
+      return if rows.empty?
+
+      rows[0]["val"]
+    end
+
     def get_starting_val(column)
       timestamp = @trigger_created_at.strftime("%Y-%m-%d %H:%M:%S")
+      timestamp = '2018-03-23 11:59:56.860362' # time difference between server and work station
       query = "SELECT MAX(#{conn.quote_ident(column)}) AS val FROM #{conn.quote_ident(dest_table)} WHERE created_at < '#{timestamp}'"
       rows = conn.execute(query)
       return default_starting_val(table, column) if rows.empty? || rows[0]["val"].nil?
 
-      get_batch_ending_val(column, rows[0]["val"], 1)
+      get_next_val(column, rows[0]["val"])
     end
 
     def get_ending_val(column)
