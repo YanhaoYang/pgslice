@@ -40,12 +40,17 @@ module PgSlice
     def batch_by_generic_column
       column = options[:batch_by]
 
-      starting_val = get_starting_val(column)
+      starting_val = options[:starting_value] || get_starting_val(column)
       unless starting_val
         abort "All data have been copied?"
       end
 
-      ending_val = get_ending_val(column)
+      if options[:where]
+        ending_val = nil
+      else
+        ending_val = get_ending_val(column)
+      end
+
       if ending_val
         query = "SELECT COUNT(*) AS cnt FROM #{conn.quote_ident(source_table)} WHERE created_at = '#{ending_val}'"
         rows = conn.execute(query)
@@ -194,9 +199,13 @@ INSERT INTO #{conn.quote_ident(dest_table)} (#{fields})
     end
 
     def get_batch_ending_val(column, starting_val)
+      where = "#{conn.quote_ident(column)} >= '#{starting_val}'"
+      if options[:where]
+        where << " AND #{options[:where]}"
+      end
       query = <<-SQL
         SELECT #{conn.quote_ident(column)} val FROM #{conn.quote_ident(source_table)}
-          WHERE #{conn.quote_ident(column)} >= '#{starting_val}'
+          WHERE #{where}
           ORDER BY #{conn.quote_ident(column)} OFFSET #{batch_size} LIMIT 1
       SQL
       rows = conn.execute(query)
