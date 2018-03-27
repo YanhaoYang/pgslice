@@ -14,30 +14,29 @@ class PgSliceCommand < Thor
 
   desc "prep", "create intermediate table and relating triggers"
   def prep
-    PgSlice::Prep.new(options).run
+    PgSlice::Commands::Prep.new(options).run
   end
 
-  desc "add_partitions TABLE", "add_partitions to TABLE, e.g. pgslice add_partitions visits --intermediate --past 1 --future 1"
-  option :intermediate, type: :boolean
-  option :series, type: :string, required: true
-  def add_partitions(table)
-    PgSlice::AddPartitions.new(table, options).run
+  desc "add_partitions", "add partitions to the table"
+  def add_partitions
+    PgSlice::Commands::AddPartitions.new(options).run
+  end
+
+  desc "enable_sync", "add triggers to keep source table and intermediate table in synch"
+  def enable_sync
+    PgSlice::Commands::EnableSync.new(options).run
   end
 
   desc "fill TABLE", "fill TABLE with original data"
-  option :batch_by, type: :string, desc: "the column name of which will be used to batch data"
   option :starting_value, type: :string, desc: "specify a start value, otherwise it will be computed from exsiting data"
-  option :source_table, type: :string
-  option :dest_table, type: :string
-  option :where, type: :string
-  option :swapped, type: :boolean, desc: "source table and destination table have been swapped."
-  def fill(table)
-    PgSlice::Fill.new(table, options).run
+  option :batch_size, type: :numeric, default: 1000, desc: "the number of records in each batch"
+  def fill
+    PgSlice::Commands::Fill.new(options).run
   end
 
-  desc "unprep TABLE", "unprepare the TABLE"
-  def unprep(table)
-    PgSlice::Unprep.new(table, options).run
+  desc "unprep", "remove intermediate table and relating triggers"
+  def unprep
+    PgSlice::Commands::Unprep.new(options).run
   end
 
   desc "analyze TABLE", "analyze the TABLE and print out information about partition tables"
