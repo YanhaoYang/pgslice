@@ -9,10 +9,12 @@ class PgSliceCommand < Thor
   end
 
   class_option :url, type: :string, desc: "A PostgreSQL connection string"
+  class_option :strategy, type: :string, required: true, desc: "A strategy class defining the partion strategy"
+  class_option :table, type: :string, required: true, desc: "The table to be partitioned"
 
-  desc "prep TABLE COLUMN PERIOD", "prepare the TABLE with specified column and period"
-  def prep(table, column)
-    PgSlice::Prep.new(table, column, options).run
+  desc "prep", "create intermediate table and relating triggers"
+  def prep
+    PgSlice::Prep.new(options).run
   end
 
   desc "add_partitions TABLE", "add_partitions to TABLE, e.g. pgslice add_partitions visits --intermediate --past 1 --future 1"
@@ -29,7 +31,6 @@ class PgSliceCommand < Thor
   option :dest_table, type: :string
   option :where, type: :string
   option :swapped, type: :boolean, desc: "source table and destination table have been swapped."
-  option :batch_size, type: :numeric, required: true, default: 1000
   def fill(table)
     PgSlice::Fill.new(table, options).run
   end
